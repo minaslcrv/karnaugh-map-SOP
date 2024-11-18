@@ -1,0 +1,350 @@
+import PySimpleGUI as sg
+import numpy as np
+import re
+
+# Diseño básico
+GRID_COLOR_ON = "Pink"
+GRID_COLOR_OFF = "Black"
+GROUP_COLOR = "White"
+GROUP_COLORS = ["#FFDDC1", "#C1FFC1", "#C1DDFF", "#FFD1DD", "#DDFFC1", "#FFC1C1", "#C1FFF1"]
+
+def get_group_color(index):
+    return GROUP_COLORS[index % len(GROUP_COLORS)]
+
+class KarnaughMina:
+    def __init__(self):
+        self.max_vars = 4
+        self.min_vars = 3
+        self.parsed_terms = []
+        self.all_vars = set()
+        self.expanded_terms = []
+        self.standardized_expr = ""
+        self.kmap = []
+        self.var_names = []
+
+        # Detalles de interfaz
+        layout = [
+            [sg.Text("Operación booleana inicial:", font=("Arial", 14))],
+            [sg.Text('Número de variables:'), 
+             sg.Combo(['3 Variables', '4 Variables'], default_value='4 Variables', key='-MAXVARS-')],
+            [sg.Text('Variables a utilizar (separadas por coma):'), 
+             sg.InputText(key="-VARNAMES-", default_text="A,B,C,D")],
+            [sg.InputText(key="-INPUT-", size=(30, 1))],
+            [sg.Button("Simplificar expresión", key="-PROCESS-")],
+            [sg.Text("Estandarizado:", font=("Arial", 14))],
+            [sg.Text("", key="-STANDARDIZED-", size=(100, 1), text_color="White")],
+            [sg.Text("Expresión simplificada:", font=("Arial", 14))],
+            [sg.Text("", key="-SIMPLIFIED-", size=(100, 1), text_color="White")],
+            [sg.Text("Mapa final", font=("Arial", 14))],
+            [sg.Column([[]], key="-KMAP-", pad=(5, 5))],
+            [sg.Text("", key="-GROUPS-", size=(70, 1), text_color="Black")],
+            [sg.Text("", key="-COUNT-", size=(50, 1))]
+        ]
+
+        self.window = sg.Window("Simplificador de POS", layout, finalize=True)
+
+    def process_expression(self):
+    # Configurar el número de variables (3 o 4)
+        self.max_vars = int(self.window["-MAXVARS-"].get().split()[0])
+    
+    # Obtener nombres de variables
+        var_names = self.window["-VARNAMES-"].get().replace(" ", "").split(",")
+        if len(var_names) < self.max_vars:
+            var_names.extend([chr(ord('A') + i) for i in range(len(var_names), self.max_vars)])
+        self.var_names = var_names[:self.max_vars]
+    
+    # Obtener la expresión ingresada
+        expression = self.window["-INPUT-"].get()
+        if not expression:
+            sg.popup_error("Ingresa una expresión válida.")
+            return
+
+    # Parsear y expandir la expresión
+        self.parsed_terms, self.all_vars = self.parse_input(expression)
+        self.all_vars = set(self.var_names[:self.max_vars])
+
+    # Estandarizar la expresión
+        self.expanded_terms = self.expand_expression(self.parsed_terms, self.all_vars)
+        self.standardized_expr = self.get_standardized_expression(self.expanded_terms)
+        self.show_standardized_expression(self.standardized_expr)
+    
+    # Llenar el Mapa de Karnaugh basado en la estandarización
+        rows, cols = (2, 4) if self.max_vars == 3 else (4, 4)
+        self.kmap = [[0] * cols for _ in range(rows)]
+
+    # Llenar el mapa con los términos de la expresión estandarizada
+        for term in self.standardized_expr.split(' + '):
+            pos_vars = set(var for var in term if var.isalpha() and not term[term.index(var) - 1] == '!')
+            neg_vars = set(var for var in self.all_vars if f'!{var}' in term)
+            r, c = self.term_to_kmap_cell(pos_vars, neg_vars)
+            self.kmap[r][c] = 1
+
+    # Simplificar el Mapa de Karnaugh
+        simplified_expr, self.groups = self.simplify_kmap()
+        self.show_simplified_expression(simplified_expr)
+        self.show_groups(self.groups)
+        self.create_kmap_display()
+
+    def parse_input(self, expression):
+        terms = expression.split('+')
+        parsed_terms = []
+        for term in terms:
+            pos_vars, neg_vars = set(), set()
+            i = 0
+            while i < len(term):
+                if term[i] == '!':
+                    neg_vars.add(term[i + 1])
+                    i += 1
+                else:
+                    pos_vars.add(term[i])
+                i += 1
+            parsed_terms.append((pos_vars, neg_vars))
+        all_vars = set().union(*[p | n for p, n in parsed_terms])
+        return parsed_terms, all_vars
+
+    def expand_expression(self, parsed_terms, all_vars):
+        expanded_terms = []
+        for pos_vars, neg_vars in parsed_terms:
+            missing_vars = list(all_vars - (pos_vars | neg_vars))
+            num_combinations = 2 ** len(missing_vars)
+            for i in range(num_combinations):
+                p, n = set(pos_vars), set(neg_vars)
+                for bit in range(len(missing_vars)):
+                    if (i >> bit) & 1:
+                        p.add(missing_vars[bit])
+                    else:
+                        n.add(missing_vars[bit])
+                expanded_terms.append((p, n))
+        return expanded_terms
+
+    def get_standardized_expression(self, expanded_terms):
+        standardized_expr = set()  #Adios duplicados
+        for pos_vars, neg_vars in expanded_terms:
+            term = ''.join(f'!{n}' if n in neg_vars else n for n in sorted(self.all_vars))
+            standardized_expr.add(term)
+        return ' + '.join(sorted(standardized_expr))  # Output
+
+    def gray_code(self, n):
+        return n ^ (n >> 1)
+
+    def term_to_kmap_cell(self, pos_vars, neg_vars):
+        if self.max_vars == 3:
+            # (A, B, C)
+            row = (1 if self.var_names[0] in pos_vars else 0)  # A
+            col = (2 if self.var_names[1] in pos_vars else 0) + \
+                  (0 if self.var_names[2] in pos_vars else 1)  # BC
+        else:
+            # (A, B, C, D)
+            row = (2 if self.var_names[0] in pos_vars else 0) + \
+                  (1 if self.var_names[1] in pos_vars else 0)  # AB
+            col = (2 if self.var_names[2] in pos_vars else 0) + \
+                  (0 if self.var_names[3] in pos_vars else 1)  # CD
+        return row, col
+
+    def find_groups(self):
+        rows, cols = (2, 4) if self.max_vars == 3 else (4, 4)
+        all_groups = []
+        visited = [[False] * cols for _ in range(rows)]
+
+    # Función para marcar como visitadas las celdas de un grupo
+        def mark_visited(cells):
+            for r, c in cells:
+                visited[r][c] = True
+
+    # Validación de grupo
+        def is_valid_group(cells):
+            return all(self.kmap[r][c] == 1 and not visited[r][c] for r, c in cells)
+
+    # Función para agregar grupo si es válido y no está cubierto
+        def add_group_if_valid(r, c, height, width):
+            group = set()
+            for i in range(height):
+                for j in range(width):
+                    cell_r = (r + i) % rows
+                    cell_c = (c + j) % cols
+                    group.add((cell_r, cell_c))
+            if is_valid_group(group):
+                all_groups.append(list(group))
+                mark_visited(group)
+
+    # Tamaños de grupo a considerar (1, 2, 4, 8)
+        possible_sizes = [8, 4, 2, 1] if self.max_vars == 4 else [4, 2, 1]
+
+    # Buscar grupos de mayor tamaño a menor (8, 4, 2, 1 o 4, 2, 1 según el caso)
+        for size in possible_sizes:
+            for r in range(rows):
+                for c in range(cols):
+                    if size == 8 and rows == 4 and cols == 4:  # Grupos de 8 (solo para 4x4)
+                        add_group_if_valid(r, c, 4, 2)
+                        add_group_if_valid(r, c, 2, 4)
+                    elif size == 4:
+                        if self.max_vars == 4:
+                            add_group_if_valid(r, c, 2, 2)  # Grupos de 4 celdas
+                            add_group_if_valid(r, c, 4, 1)  # Vertical (4x1)
+                            add_group_if_valid(r, c, 1, 4)  # Horizontal (1x4)
+                        else:  # Para 3 variables (2x4 mapa)
+                            add_group_if_valid(r, c, 2, 2)  # Grupos de 4 celdas
+                    elif size == 2:
+                        add_group_if_valid(r, c, 2, 1)  # Vertical
+                        add_group_if_valid(r, c, 1, 2)  # Horizontal
+                    elif size == 1:
+                        add_group_if_valid(r, c, 1, 1)  # Celda individual
+
+    # Filtrar duplicados
+        unique_groups = []
+        seen = set()
+        for group in all_groups:
+            group_tuple = tuple(sorted(group))
+            if group_tuple not in seen:
+                seen.add(group_tuple)
+                unique_groups.append(group)
+
+        return unique_groups
+
+    def create_kmap_display(self):
+        self.window["-KMAP-"].update([])
+        kmap_display = []
+
+        if self.max_vars == 3:
+            row_labels = ['0', '1']
+            col_labels = ['00', '01', '11', '10']
+        else:  # 4 variables
+            row_labels = ['00', '01', '11', '10']
+            col_labels = ['00', '01', '11', '10']
+
+        header = [sg.Text('', size=(3, 1))] + [sg.Text(cl, size=(3, 1)) for cl in col_labels]
+        kmap_display.append(header)
+
+        cell_colors = [[GRID_COLOR_OFF for _ in range(len(self.kmap[0]))] 
+                      for _ in range(len(self.kmap))]
+
+        for idx, group in enumerate(self.groups):
+            color = get_group_color(idx)
+            for (r, c) in group:
+                cell_colors[r][c] = color
+
+        for r, row in enumerate(self.kmap):
+            row_display = [sg.Text(row_labels[r], size=(3, 1))]
+            for c, value in enumerate(row):
+                color = cell_colors[r][c]
+                row_display.append(sg.Text(str(value), background_color=color, size=(3, 1)))
+            kmap_display.append(row_display)
+
+        self.window.extend_layout(self.window["-KMAP-"], kmap_display)
+
+    def cell_to_variables(self, r, c):
+        """Coordenadas"""
+        if self.max_vars == 3:
+            # 3 variables
+            assignments = []
+            # Primera variable
+            assignments.append((self.var_names[0], r == 1))
+            # 2 y 3
+            col_to_vars = {
+                0: (True, True),   # 00
+                1: (True, False),  # 01
+                2: (False, False), # 11
+                3: (False, True)   # 10
+            }
+            b_val, c_val = col_to_vars[c]
+            assignments.extend([
+                (self.var_names[1], b_val),
+                (self.var_names[2], c_val)
+            ])
+        else:
+            # 4 variables
+            row_to_vars = {
+                0: (True, True),   # 00
+                1: (True, False),  # 01
+                2: (False, False), # 11
+                3: (False, True)   # 10
+            }
+            col_to_vars = {
+                0: (True, True),   # 00
+                1: (True, False),  # 01
+                2: (False, False), # 11
+                3: (False, True)   # 10
+            }
+            a_val, b_val = row_to_vars[r]
+            c_val, d_val = col_to_vars[c]
+            assignments = [
+                (self.var_names[0], a_val),
+                (self.var_names[1], b_val),
+                (self.var_names[2], c_val),
+                (self.var_names[3], d_val)
+            ]
+        return assignments
+
+    def group_to_term(self, group):
+        """Convertir grupo a la expresión mínima"""
+        # Asigna celdas
+        all_assignments = []
+        for r, c in group:
+            all_assignments.append(self.cell_to_variables(r, c))
+        
+        # Encuentra factores en común
+        common = {}
+        for var in self.var_names[:self.max_vars]:
+            values = set()
+            for cell_assignments in all_assignments:
+                for var_name, value in cell_assignments:
+                    if var_name == var:
+                        values.add(value)
+            if len(values) == 1:  # Checa si se tienen las mismas variables en una serie de celdas
+                common[var] = values.pop()
+        
+        # Convierte a términos
+        term_parts = []
+        for var in sorted(common.keys()):
+            if not common[var]:#-
+                term_parts.append(f'!{var}')
+            else:#+
+                term_parts.append(var)
+        
+        return ''.join(term_parts) if term_parts else '1'
+
+    def simplify_kmap(self):
+        groups = self.find_groups()
+        self.window["-COUNT-"].update(f"Número de grupos encontrados: {len(groups)}")
+
+    # Generar términos simplificados basados en los grupos
+        terms = []
+        seen_terms = set()
+        for group in groups:
+            term = self.group_to_term(group)
+            if term not in seen_terms:
+                terms.append(term)
+                seen_terms.add(term)
+
+    # Generar la expresión simplificada
+        simplified_expr = ' + '.join(terms) if terms else '0'
+        return simplified_expr, groups
+    
+    def simplify_expression(expression):
+        varss= expression.split('+')
+        ord=[''.join(sorted(re.findall(r"[A-D]'?", n)for n in varss))]
+        return'+'.join(sorted(set(ord)))
+    
+    def show_standardized_expression(self, expression):
+        self.window["-STANDARDIZED-"].update(expression)
+
+    def show_simplified_expression(self, expression):
+        self.window["-SIMPLIFIED-"].update(expression)
+
+    def show_groups(self, groups):
+        group_text = "\n".join(f"Group {i+1}: {self.group_to_term(g)}" for i, g in enumerate(groups))
+        self.window["-GROUPS-"].update(group_text)
+
+    def run(self):
+        while True:
+            event, values = self.window.read()
+            if event == sg.WINDOW_CLOSED:
+                break
+            elif event == "-PROCESS-":
+                self.process_expression()
+
+        self.window.close()
+
+if __name__ == "__main__":
+    app = KarnaughMina()
+    app.run()
